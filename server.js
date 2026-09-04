@@ -46,11 +46,11 @@ app.get('/api/admin/archivos', async (req, res) => {
     }
 });
 
-// Ruta blindada para borrar PDFs
+// Ruta blindada para borrar PDFs (Sintaxis moderna)
 app.delete('/api/admin/archivos/:fileId(*)', async (req, res) => {
     try {
-        // El asterisco atrapa TODO lo que el navegador envíe después de /archivos/
-        let fileId = req.params[0]; 
+        // Express guarda todo lo que va después de "archivos/" en la variable fileId
+        let fileId = req.params.fileId; 
         
         // Si la palabra 'files/' se perdió en el camino, se la ponemos
         if (!fileId.startsWith('files/')) {
