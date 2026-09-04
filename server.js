@@ -46,21 +46,30 @@ app.get('/api/admin/archivos', async (req, res) => {
     }
 });
 
-// Ruta blindada para borrar PDFs (Sintaxis moderna)
-app.delete('/api/admin/archivos/:fileId(*)', async (req, res) => {
+// Opción A: Cuando el navegador envía el ID en dos partes separadas (ej. files/12345)
+app.delete('/api/admin/archivos/:carpeta/:id', async (req, res) => {
     try {
-        // Express guarda todo lo que va después de "archivos/" en la variable fileId
-        let fileId = req.params.fileId; 
-        
-        // Si la palabra 'files/' se perdió en el camino, se la ponemos
-        if (!fileId.startsWith('files/')) {
-            fileId = `files/${fileId}`;
-        }
-
+        const fileId = `${req.params.carpeta}/${req.params.id}`;
         console.log("🗑️ Intentando borrar de Gemini el archivo:", fileId);
         await fileManager.deleteFile(fileId);
         console.log("✅ Archivo borrado exitosamente");
-        
+        res.json({ mensaje: 'Archivo eliminado' });
+    } catch (error) {
+        console.error("❌ ERROR AL BORRAR:", error);
+        res.status(500).json({ error: 'Error al eliminar el documento.' });
+    }
+});
+
+// Opción B: Cuando el navegador envía el ID todo junto o codificado
+app.delete('/api/admin/archivos/:fileId', async (req, res) => {
+    try {
+        let fileId = req.params.fileId; 
+        if (!fileId.startsWith('files/')) {
+            fileId = `files/${fileId}`;
+        }
+        console.log("🗑️ Intentando borrar de Gemini el archivo:", fileId);
+        await fileManager.deleteFile(fileId);
+        console.log("✅ Archivo borrado exitosamente");
         res.json({ mensaje: 'Archivo eliminado' });
     } catch (error) {
         console.error("❌ ERROR AL BORRAR:", error);
