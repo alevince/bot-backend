@@ -46,11 +46,31 @@ app.get('/api/admin/archivos', async (req, res) => {
     }
 });
 
-app.delete('/api/admin/archivos/:fileId', async (req, res) => {
+// Ruta corregida para borrar archivos de Gemini
+app.delete('/api/admin/archivos/files/:fileId', async (req, res) => {
     try {
-        await fileManager.deleteFile(req.params.fileId);
+        const fileId = `files/${req.params.fileId}`;
+        console.log("🗑️ Eliminando archivo de Gemini:", fileId);
+        await fileManager.deleteFile(fileId);
+        console.log("✅ Archivo eliminado con éxito");
         res.json({ mensaje: 'Archivo eliminado' });
     } catch (error) {
+        console.error("❌ Error al eliminar archivo:", error);
+        res.status(500).json({ error: 'Error al eliminar el documento.' });
+    }
+});
+
+app.delete('/api/admin/archivos/:fileId', async (req, res) => {
+    try {
+        const fileId = req.params.fileId.startsWith('files/') 
+            ? req.params.fileId 
+            : `files/${req.params.fileId}`;
+        console.log("🗑️ Eliminando archivo de Gemini:", fileId);
+        await fileManager.deleteFile(fileId);
+        console.log("✅ Archivo eliminado con éxito");
+        res.json({ mensaje: 'Archivo eliminado' });
+    } catch (error) {
+        console.error("❌ Error al eliminar archivo:", error);
         res.status(500).json({ error: 'Error al eliminar el documento.' });
     }
 });
