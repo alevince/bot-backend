@@ -47,7 +47,7 @@ app.get('/api/admin/archivos', async (req, res) => {
 });
 
 // Ruta blindada para borrar PDFs
-app.delete('/api/admin/archivos/:fileId(*):', async (req, res) => {
+app.delete('/api/admin/archivos/:fileId(*)', async (req, res) => {
     try {
         // El asterisco atrapa TODO lo que el navegador envíe después de /archivos/
         let fileId = req.params[0]; 
