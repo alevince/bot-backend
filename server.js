@@ -125,8 +125,6 @@ app.post('/api/chat', async (req, res) => {
                 }
             }
         }
-        }
-        
         console.log("✅ Gemini respondió con éxito.");
         res.json({ respuesta: result.response.text() });
 
