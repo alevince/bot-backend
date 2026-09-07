@@ -101,7 +101,26 @@ app.post('/api/chat', async (req, res) => {
         });
 
         console.log("🧠 Enviando pregunta a Gemini...");
-        const result = await model.generateContent([...contextoArchivos, pregunta]);
+        let result;
+        let intentos = 0;
+        const maxIntentos = 3;
+        
+        while (intentos < maxIntentos) {
+            try {
+                result = await model.generateContent([...contextoArchivos, pregunta]);
+                break; // Si responde bien, sale del bucle
+            } catch (error) {
+                if (error.status === 503) {
+                    intentos++;
+                    console.log(`⚠️ Servidor ocupado. Reintentando... (${intentos}/${maxIntentos})`);
+                    if (intentos === maxIntentos) throw error;
+                    // Espera 4 segundos antes de volver a intentar
+                    await new Promise(resolve => setTimeout(resolve, 4000));
+                } else {
+                    throw error; // Si es otro error, falla normalmente
+                }
+            }
+        }
         
         console.log("✅ Gemini respondió con éxito.");
         res.json({ respuesta: result.response.text() });
