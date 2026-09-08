@@ -1,139 +1,156 @@
-require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
 const multer = require('multer');
-const fs = require('fs');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { GoogleAIFileManager } = require('@google/generative-ai/server');
+const fs = require('fs');
+const pdf = require('pdf-parse');
+const cors = require('cors');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
-app.use(cors()); 
+
+// Iniciar Gemini (Asegúrate de tener GEMINI_API_KEY en los Environment Variables de Render)
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }); 
+const embeddingModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
 
 const upload = multer({ dest: 'uploads/' });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const fileManager = new GoogleAIFileManager(process.env.GEMINI_API_KEY);
+// --- 🧠 BASE DE DATOS VECTORIAL (EN MEMORIA) ---
+let documentosActivos = []; // Para mostrar en tu Panel Admin web
+let baseDeDatosVectorial = []; // Aquí se guardan los fragmentos y sus coordenadas matemáticas
 
+// --- ⚙️ HERRAMIENTAS RAG ---
+// Función para picar el documento en bloques de ~1000 caracteres
+function fragmentarTexto(texto, tamaño = 1000) {
+    const fragmentos = [];
+    let inicio = 0;
+    while (inicio < texto.length) {
+        let fin = inicio + tamaño;
+        // Evita cortar palabras a la mitad buscando el próximo espacio
+        if (fin < texto.length) {
+            let proximoEspacio = texto.indexOf(' ', fin);
+            if (proximoEspacio !== -1 && proximoEspacio - fin < 100) fin = proximoEspacio;
+        }
+        fragmentos.push(texto.slice(inicio, fin));
+        inicio = fin;
+    }
+    return fragmentos;
+}
+
+// Función matemática para buscar los bloques más parecidos a la pregunta
+function similitudCoseno(vecA, vecB) {
+    let productoPunto = 0, normaA = 0, normaB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        productoPunto += vecA[i] * vecB[i];
+        normaA += vecA[i] * vecA[i];
+        normaB += vecB[i] * vecB[i];
+    }
+    return productoPunto / (Math.sqrt(normaA) * Math.sqrt(normaB));
+}
+
+// --- 🌐 RUTAS DEL SERVIDOR ---
+
+// 1. Subir PDF, Picar y Vectorizar
 app.post('/api/admin/archivos', upload.single('documento'), async (req, res) => {
     try {
-        console.log("📥 Recibiendo nuevo PDF...");
-        const filePath = req.file.path;
-        const uploadResponse = await fileManager.uploadFile(filePath, {
-            mimeType: "application/pdf",
-            displayName: req.file.originalname,
-        });
-        fs.unlinkSync(filePath); 
-        console.log("✅ PDF subido a Gemini con ID:", uploadResponse.file.name);
-        res.json({ mensaje: 'Archivo subido', file_id: uploadResponse.file.name });
-    } catch (error) {
-        console.error("❌ ERROR AL SUBIR PDF:", error);
-        res.status(500).json({ error: 'Error al subir el documento.' });
-    }
-});
-
-app.get('/api/admin/archivos', async (req, res) => {
-    try {
-        const listFilesResponse = await fileManager.listFiles();
-        const archivos = (listFilesResponse.files || []).map(f => ({
-            id: f.name,
-            nombre: f.displayName,
-            fecha: new Date(f.createTime).toLocaleDateString()
-        }));
-        res.json(archivos);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al listar los documentos.' });
-    }
-});
-
-// Opción A: Cuando el navegador envía el ID en dos partes separadas (ej. files/12345)
-app.delete('/api/admin/archivos/:carpeta/:id', async (req, res) => {
-    try {
-        const fileId = `${req.params.carpeta}/${req.params.id}`;
-        console.log("🗑️ Intentando borrar de Gemini el archivo:", fileId);
-        await fileManager.deleteFile(fileId);
-        console.log("✅ Archivo borrado exitosamente");
-        res.json({ mensaje: 'Archivo eliminado' });
-    } catch (error) {
-        console.error("❌ ERROR AL BORRAR:", error);
-        res.status(500).json({ error: 'Error al eliminar el documento.' });
-    }
-});
-
-// Opción B: Cuando el navegador envía el ID todo junto o codificado
-app.delete('/api/admin/archivos/:fileId', async (req, res) => {
-    try {
-        let fileId = req.params.fileId; 
-        if (!fileId.startsWith('files/')) {
-            fileId = `files/${fileId}`;
-        }
-        console.log("🗑️ Intentando borrar de Gemini el archivo:", fileId);
-        await fileManager.deleteFile(fileId);
-        console.log("✅ Archivo borrado exitosamente");
-        res.json({ mensaje: 'Archivo eliminado' });
-    } catch (error) {
-        console.error("❌ ERROR AL BORRAR:", error);
-        res.status(500).json({ error: 'Error al eliminar el documento.' });
-    }
-});
-// --- RUTA DEL CHATBOT ---
-app.post('/api/chat', async (req, res) => {
-    try {
-        const { pregunta } = req.body;
-        console.log("🗣️ El usuario preguntó:", pregunta);
-
-        const listFilesResponse = await fileManager.listFiles();
-        const archivosActivos = listFilesResponse.files || [];
-
-        if (archivosActivos.length === 0) {
-            console.log("⚠️ No hay archivos en la cuenta de Gemini.");
-            return res.json({ respuesta: "No hay PDFs subidos para leer." });
-        }
-
-        console.log(`📚 Preparando ${archivosActivos.length} archivo(s) para leer...`);
-        const contextoArchivos = archivosActivos.map(f => ({
-            fileData: { mimeType: f.mimeType, fileUri: f.uri }
-        }));
-
-        const model = genAI.getGenerativeModel({
-            model: "gemini-3.6-flash",
-            systemInstruction: "Responde basándote ÚNICAMENTE en los documentos proporcionados. Si la respuesta no está, di que no sabes."
-        });
-
-        console.log("🧠 Enviando pregunta a Gemini...");
-       let result;
-        let intentos = 0;
-        const maxIntentos = 3;
+        const file = req.file;
+        const docId = file.filename;
         
-        while (intentos < maxIntentos) {
-            try {
-                result = await model.generateContent([...contextoArchivos, pregunta]);
-                break;
-            } catch (error) {
-                // Atrapamos tanto el 503 (Saturación) como el 429 (Límite de velocidad)
-                if (error.status === 503 || error.status === 429) {
-                    intentos++;
-                    // Multiplica el intento por 5 segundos (5s, 10s, 15s)
-                    const tiempoEspera = intentos * 5000; 
-                    
-                    console.log(`⚠️ Pausa por error ${error.status}. Esperando ${tiempoEspera/1000} segundos... (${intentos}/${maxIntentos})`);
-                    
-                    if (intentos === maxIntentos) throw error;
-                    await new Promise(resolve => setTimeout(resolve, tiempoEspera));
-                } else {
-                    throw error;
-                }
+        console.log(`📚 Leyendo PDF: "${file.originalname}"...`);
+        const dataBuffer = fs.readFileSync(file.path);
+        const data = await pdf(dataBuffer);
+        const textoCompleto = data.text;
+        
+        const fragmentos = fragmentarTexto(textoCompleto);
+        console.log(`🔪 Documento dividido en ${fragmentos.length} fragmentos. Generando vectores... (Esto puede tomar unos segundos)`);
+
+        // Convertir cada fragmento en un vector usando Gemini Embeddings
+        for (let i = 0; i < fragmentos.length; i++) {
+            const text = fragmentos[i];
+            // Evitamos enviar fragmentos vacíos
+            if (text.trim().length > 10) { 
+                const result = await embeddingModel.embedContent(text);
+                const vector = result.embedding.values;
+                
+                baseDeDatosVectorial.push({
+                    idDoc: docId,
+                    texto: text,
+                    vector: vector
+                });
             }
         }
-        console.log("✅ Gemini respondió con éxito.");
-        res.json({ respuesta: result.response.text() });
 
+        documentosActivos.push({ id: docId, nombre: file.originalname });
+        fs.unlinkSync(file.path); // Borramos el PDF físico para ahorrar espacio
+        
+        console.log("✅ ¡Documento vectorizado e indexado con éxito!");
+        res.json({ mensaje: 'Archivo subido y procesado' });
     } catch (error) {
-        console.error("🚨 ERROR FATAL DE GEMINI:", error);
-        res.status(500).json({ error: 'Error procesando tu pregunta.' });
+        console.error("❌ Error al procesar PDF:", error);
+        res.status(500).json({ error: 'Error interno al procesar el documento' });
     }
 });
 
-app.listen(3000, () => {
-    console.log(`🚀 Motor funcionando! Escuchando en el puerto 3000`);
+// 2. Listar archivos (Para la Vista Admin)
+app.get('/api/admin/archivos', (req, res) => {
+    res.json(documentosActivos);
+});
+
+// 3. Borrar archivos
+app.delete('/api/admin/archivos/:id', (req, res) => {
+    const id = req.params.id;
+    documentosActivos = documentosActivos.filter(d => d.id !== id);
+    baseDeDatosVectorial = baseDeDatosVectorial.filter(v => v.idDoc !== id);
+    console.log(`🗑️ Archivo eliminado de la base vectorial.`);
+    res.json({ mensaje: 'Eliminado' });
+});
+
+// 4. El Chat Inteligente (Búsqueda + Respuesta)
+app.post('/api/chat', async (req, res) => {
+    try {
+        const pregunta = req.body.pregunta;
+        
+        if (baseDeDatosVectorial.length === 0) {
+            return res.json({ respuesta: "La base de datos está vacía. Por favor, sube un documento primero." });
+        }
+
+        console.log(`🗣️ Pregunta: ${pregunta}`);
+
+        // Paso A: Convertir la pregunta a números
+        const reqEmbedding = await embeddingModel.embedContent(pregunta);
+        const vectorPregunta = reqEmbedding.embedding.values;
+
+        // Paso B: Comparar la pregunta con todos los fragmentos del libro
+        const resultados = baseDeDatosVectorial.map(item => {
+            return {
+                texto: item.texto,
+                similitud: similitudCoseno(vectorPregunta, item.vector)
+            };
+        });
+
+        // Paso C: Ordenar y elegir SOLO los 4 fragmentos más relevantes
+        resultados.sort((a, b) => b.similitud - a.similitud);
+        const mejoresFragmentos = resultados.slice(0, 4).map(r => r.texto);
+        const contextoStr = mejoresFragmentos.join("\n\n---\n\n");
+        
+        console.log("🧠 Enviando solo los 4 fragmentos más útiles a Gemini...");
+
+        // Paso D: Inyectar esos fragmentos en la orden a Gemini
+        const promptFinal = `Eres un asistente experto. Responde a la pregunta del usuario basándote ÚNICAMENTE en la siguiente información extraída del documento. Si la respuesta no está en el texto proporcionado, di que no lo sabes, no inventes información.\n\nINFORMACIÓN EXTRAÍDA:\n${contextoStr}\n\nPREGUNTA DEL USUARIO: ${pregunta}`;
+
+        const result = await model.generateContent(promptFinal);
+        const respuesta = result.response.text();
+
+        console.log("✅ Respuesta enviada al usuario");
+        res.json({ respuesta: respuesta });
+    } catch (error) {
+        console.error("❌ Error en chat:", error);
+        res.status(500).json({ error: 'Error al generar respuesta' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Motor RAG Vectorial funcionando en puerto ${PORT}`);
 });
