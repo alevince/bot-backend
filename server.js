@@ -84,12 +84,13 @@ async function inicializarConocimiento() {
                             texto: text,
                             vector: result.embedding.values
                         });
-                        exito = true;
-                        await esperar(500); // Pausa mínima obligatoria para cuidar la cuota gratuita
+                                                exito = true;
+                        await esperar(4500); // Espera 4.5 segundos para no superar las 15 peticiones por minuto
                     } catch (error) {
-                        console.log(`⚠️ Google pide paciencia. Pausa de 5 segundos...`);
-                        await esperar(5000); // Si choca con el límite 429, respira 5 segundos
+                        console.log(`⚠️ Límite de velocidad detectado. Respirando 30 segundos...`);
+                        await esperar(30000); // Si Google nos frena, hacemos una pausa larga
                     }
+
                 }
             }
         }
