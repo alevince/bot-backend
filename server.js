@@ -1,7 +1,7 @@
 const express = require('express');
-const multer = require('multer');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fs = require('fs');
+const path = require('path');
 const pdf = require('pdf-parse');
 const cors = require('cors');
 
@@ -9,25 +9,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Iniciar Gemini (Asegúrate de tener GEMINI_API_KEY en los Environment Variables de Render)
+// Iniciar Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }); 
-const embeddingModel = genAI.getGenerativeModel({ model: 'text-embedding-001' });
-
-const upload = multer({ dest: 'uploads/' });
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const embeddingModel = genAI.getGenerativeModel({ model: 'embedding-001' }); // Usamos el modelo seguro que no da error 404
 
 // --- 🧠 BASE DE DATOS VECTORIAL (EN MEMORIA) ---
-let documentosActivos = []; // Para mostrar en tu Panel Admin web
-let baseDeDatosVectorial = []; // Aquí se guardan los fragmentos y sus coordenadas matemáticas
+let baseDeDatosVectorial = [];
+let botListo = false; // Este interruptor nos dirá si el bot ya terminó de estudiar
 
 // --- ⚙️ HERRAMIENTAS RAG ---
-// Función para picar el documento en bloques de ~1000 caracteres
 function fragmentarTexto(texto, tamaño = 1000) {
     const fragmentos = [];
     let inicio = 0;
     while (inicio < texto.length) {
         let fin = inicio + tamaño;
-        // Evita cortar palabras a la mitad buscando el próximo espacio
         if (fin < texto.length) {
             let proximoEspacio = texto.indexOf(' ', fin);
             if (proximoEspacio !== -1 && proximoEspacio - fin < 100) fin = proximoEspacio;
@@ -38,7 +34,6 @@ function fragmentarTexto(texto, tamaño = 1000) {
     return fragmentos;
 }
 
-// Función matemática para buscar los bloques más parecidos a la pregunta
 function similitudCoseno(vecA, vecB) {
     let productoPunto = 0, normaA = 0, normaB = 0;
     for (let i = 0; i < vecA.length; i++) {
@@ -49,79 +44,79 @@ function similitudCoseno(vecA, vecB) {
     return productoPunto / (Math.sqrt(normaA) * Math.sqrt(normaB));
 }
 
-// --- 🌐 RUTAS DEL SERVIDOR ---
+// Función para obligar al bot a hacer pausas
+const esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 1. Subir PDF, Picar y Vectorizar
-app.post('/api/admin/archivos', upload.single('documento'), async (req, res) => {
-    try {
-        const file = req.file;
-        const docId = file.filename;
-        
-        console.log(`📚 Leyendo PDF: "${file.originalname}"...`);
-        const dataBuffer = fs.readFileSync(file.path);
+// --- 📚 RUTINA DE ESTUDIO (Se ejecuta sola al prender el servidor) ---
+async function inicializarConocimiento() {
+    console.log("Iniciando rutina de estudio...");
+    const directorioPdfs = path.join(__dirname, 'pdfs');
+    
+    if (!fs.existsSync(directorioPdfs)) {
+        console.log("No se encontró la carpeta 'pdfs'.");
+        return;
+    }
+
+    const archivos = fs.readdirSync(directorioPdfs).filter(f => f.endsWith('.pdf'));
+    
+    if (archivos.length === 0) {
+        console.log("No hay PDFs en la carpeta para leer.");
+        return;
+    }
+
+    for (const archivo of archivos) {
+        console.log(`\n📚 Leyendo: "${archivo}"...`);
+        const dataBuffer = fs.readFileSync(path.join(directorioPdfs, archivo));
         const data = await pdf(dataBuffer);
-        const textoCompleto = data.text;
         
-        const fragmentos = fragmentarTexto(textoCompleto);
-        console.log(`🔪 Documento dividido en ${fragmentos.length} fragmentos. Generando vectores... (Esto puede tomar unos segundos)`);
+        const fragmentos = fragmentarTexto(data.text);
+        console.log(`🔪 Dividido en ${fragmentos.length} fragmentos. Memorizando... (Esto toma un momento)`);
 
-        // Convertir cada fragmento en un vector usando Gemini Embeddings
         for (let i = 0; i < fragmentos.length; i++) {
-            const text = fragmentos[i];
-            // Evitamos enviar fragmentos vacíos
-            if (text.trim().length > 10) { 
-                const result = await embeddingModel.embedContent(text);
-                const vector = result.embedding.values;
-                
-                baseDeDatosVectorial.push({
-                    idDoc: docId,
-                    texto: text,
-                    vector: vector
-                });
+            const text = fragmentos[i].trim();
+            if (text.length > 10) {
+                let exito = false;
+                while (!exito) {
+                    try {
+                        const result = await embeddingModel.embedContent(text);
+                        baseDeDatosVectorial.push({
+                            fuente: archivo,
+                            texto: text,
+                            vector: result.embedding.values
+                        });
+                        exito = true;
+                        await esperar(500); // Pausa mínima obligatoria para cuidar la cuota gratuita
+                    } catch (error) {
+                        console.log(`⚠️ Google pide paciencia. Pausa de 5 segundos...`);
+                        await esperar(5000); // Si choca con el límite 429, respira 5 segundos
+                    }
+                }
             }
         }
-
-        documentosActivos.push({ id: docId, nombre: file.originalname });
-        fs.unlinkSync(file.path); // Borramos el PDF físico para ahorrar espacio
-        
-        console.log("✅ ¡Documento vectorizado e indexado con éxito!");
-        res.json({ mensaje: 'Archivo subido y procesado' });
-    } catch (error) {
-        console.error("❌ Error al procesar PDF:", error);
-        res.status(500).json({ error: 'Error interno al procesar el documento' });
+        console.log(`✅ Documento "${archivo}" completamente memorizado.`);
     }
-});
+    
+    botListo = true;
+    console.log("\n🎓 ¡EL BOT HA TERMINADO DE ESTUDIAR Y ESTÁ LISTO PARA RESPONDER!");
+}
 
-// 2. Listar archivos (Para la Vista Admin)
-app.get('/api/admin/archivos', (req, res) => {
-    res.json(documentosActivos);
-});
+// --- 🌐 RUTAS DEL SERVIDOR ---
 
-// 3. Borrar archivos
-app.delete('/api/admin/archivos/:id', (req, res) => {
-    const id = req.params.id;
-    documentosActivos = documentosActivos.filter(d => d.id !== id);
-    baseDeDatosVectorial = baseDeDatosVectorial.filter(v => v.idDoc !== id);
-    console.log(`🗑️ Archivo eliminado de la base vectorial.`);
-    res.json({ mensaje: 'Eliminado' });
-});
-
-// 4. El Chat Inteligente (Búsqueda + Respuesta)
+// El Chat Inteligente
 app.post('/api/chat', async (req, res) => {
     try {
-        const pregunta = req.body.pregunta;
-        
-        if (baseDeDatosVectorial.length === 0) {
-            return res.json({ respuesta: "La base de datos está vacía. Por favor, sube un documento primero." });
+        // Si el usuario pregunta mientras el bot lee, le avisamos:
+        if (!botListo) {
+            return res.json({ respuesta: "⏳ Aguarda un momento, me acaban de encender y todavía estoy leyendo los PDFs. ¡Intenta de nuevo en un minuto!" });
         }
 
+        const pregunta = req.body.pregunta;
         console.log(`🗣️ Pregunta: ${pregunta}`);
 
-        // Paso A: Convertir la pregunta a números
+        // Vectorizar pregunta y buscar
         const reqEmbedding = await embeddingModel.embedContent(pregunta);
         const vectorPregunta = reqEmbedding.embedding.values;
 
-        // Paso B: Comparar la pregunta con todos los fragmentos del libro
         const resultados = baseDeDatosVectorial.map(item => {
             return {
                 texto: item.texto,
@@ -129,20 +124,17 @@ app.post('/api/chat', async (req, res) => {
             };
         });
 
-        // Paso C: Ordenar y elegir SOLO los 4 fragmentos más relevantes
+        // Seleccionar los 4 mejores fragmentos
         resultados.sort((a, b) => b.similitud - a.similitud);
         const mejoresFragmentos = resultados.slice(0, 4).map(r => r.texto);
         const contextoStr = mejoresFragmentos.join("\n\n---\n\n");
         
-        console.log("🧠 Enviando solo los 4 fragmentos más útiles a Gemini...");
-
-        // Paso D: Inyectar esos fragmentos en la orden a Gemini
-        const promptFinal = `Eres un asistente experto. Responde a la pregunta del usuario basándote ÚNICAMENTE en la siguiente información extraída del documento. Si la respuesta no está en el texto proporcionado, di que no lo sabes, no inventes información.\n\nINFORMACIÓN EXTRAÍDA:\n${contextoStr}\n\nPREGUNTA DEL USUARIO: ${pregunta}`;
+        // Consultar a Gemini
+        const promptFinal = `Eres un asistente experto. Responde a la pregunta basándote ÚNICAMENTE en la siguiente información.\n\nINFORMACIÓN EXTRAÍDA:\n${contextoStr}\n\nPREGUNTA DEL USUARIO: ${pregunta}`;
 
         const result = await model.generateContent(promptFinal);
         const respuesta = result.response.text();
 
-        console.log("✅ Respuesta enviada al usuario");
         res.json({ respuesta: respuesta });
     } catch (error) {
         console.error("❌ Error en chat:", error);
@@ -152,5 +144,6 @@ app.post('/api/chat', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Motor RAG Vectorial funcionando en puerto ${PORT}`);
+    console.log(`🚀 Servidor encendido en puerto ${PORT}`);
+    inicializarConocimiento(); // Inicia la lectura automática apenas prende
 });
